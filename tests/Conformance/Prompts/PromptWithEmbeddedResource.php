@@ -21,10 +21,10 @@ class PromptWithEmbeddedResource extends Prompt
     public function handle(Request $request): array
     {
         return [
-            Response::resourceLink(
+            Response::embeddedResource(
                 uri: $request->get('resourceUri'),
-                name: 'embedded-resource',
-                description: 'Embedded resource content for testing.',
+                text: 'Embedded resource content for testing.',
+                mimeType: 'text/plain',
             ),
             Response::text('Please process the embedded resource above.'),
         ];

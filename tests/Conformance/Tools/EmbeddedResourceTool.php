@@ -16,11 +16,10 @@ class EmbeddedResourceTool extends Tool
 
     public function handle(Request $request): Response
     {
-        return Response::resourceLink(
+        return Response::embeddedResource(
             uri: 'test://embedded-resource',
-            name: 'embedded-resource',
+            text: 'This is an embedded resource content.',
             mimeType: 'text/plain',
-            description: 'This is an embedded resource content.',
         );
     }
 }

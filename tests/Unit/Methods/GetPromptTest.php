@@ -9,6 +9,8 @@ use Laravel\Mcp\Server\Prompt;
 use Laravel\Mcp\Server\ServerContext;
 use Laravel\Mcp\Transport\JsonRpcRequest;
 use Laravel\Mcp\Transport\JsonRpcResponse;
+use Tests\Fixtures\DailyPlanResource;
+use Tests\Fixtures\EmbeddedResourcePrompt;
 use Tests\Fixtures\PromptWithResultMetaPrompt;
 use Tests\Fixtures\ReviewMyCodePrompt;
 use Tests\Fixtures\TellMeHiPrompt;
@@ -378,4 +380,47 @@ it('returns plain message in prompt error when APP_DEBUG is false', function ():
         expect($jsonRpcException->getCode())->toBe(-32603)
             ->and($jsonRpcException->getMessage())->toBe('An internal server error occurred.');
     }
+});
+
+it('returns embedded resource content from a prompt', function (): void {
+    $request = JsonRpcRequest::from([
+        'jsonrpc' => '2.0',
+        'id' => 1,
+        'method' => 'prompts/get',
+        'params' => ['name' => 'embedded-resource-prompt', 'arguments' => []],
+    ]);
+
+    $context = new ServerContext(
+        supportedProtocolVersions: ['2025-03-26'],
+        serverCapabilities: [],
+        implementation: new Implementation('Test Server', '1.0.0'),
+        instructions: 'Test instructions',
+        maxPaginationLength: 50,
+        defaultPaginationLength: 10,
+        tools: [],
+        resources: [],
+        prompts: [EmbeddedResourcePrompt::class],
+    );
+
+    $responses = iterator_to_array((new GetPrompt)->handle($request, $context));
+
+    $payload = end($responses)->toArray();
+
+    expect($payload['result']['messages'])->toEqual([
+        [
+            'role' => 'user',
+            'content' => [
+                'type' => 'resource',
+                'resource' => [
+                    'uri' => 'file://resources/daily-plan.md',
+                    'mimeType' => 'text/markdown',
+                    'text' => (new DailyPlanResource)->handle(),
+                ],
+            ],
+        ],
+        [
+            'role' => 'user',
+            'content' => ['type' => 'text', 'text' => 'Review the plan above.'],
+        ],
+    ]);
 });

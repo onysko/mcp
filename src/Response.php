@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Laravel\Mcp;
 
+use Generator;
 use Illuminate\Container\Container;
 use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Support\Facades\Storage;
@@ -15,12 +16,14 @@ use Laravel\Mcp\Enums\Role;
 use Laravel\Mcp\Schema\Icon;
 use Laravel\Mcp\Server\Content\Audio;
 use Laravel\Mcp\Server\Content\Blob;
+use Laravel\Mcp\Server\Content\EmbeddedResource;
 use Laravel\Mcp\Server\Content\Image;
 use Laravel\Mcp\Server\Content\Notification;
 use Laravel\Mcp\Server\Content\ResourceLink;
 use Laravel\Mcp\Server\Content\StructuredContentText;
 use Laravel\Mcp\Server\Content\Text;
 use Laravel\Mcp\Server\Contracts\Content;
+use Laravel\Mcp\Server\Contracts\HasUriTemplate;
 use Laravel\Mcp\Server\Resource;
 use League\Flysystem\UnableToReadFile;
 
@@ -187,6 +190,157 @@ class Response
         };
 
         return new static($link);
+    }
+
+    /**
+     * Embed a resource's contents in a tool or prompt response.
+     *
+     * Accepts a URI with explicit text or blob contents, or a registered resource
+     * (class-string or instance) whose handler is run to produce them, with the
+     * given arguments filling its URI template.
+     *
+     * @param  array<string, mixed>  $arguments
+     * @param  array<string, mixed>  $annotations
+     */
+    public static function embeddedResource(
+        string|Resource|EmbeddedResource $uri,
+        array $arguments = [],
+        ?string $text = null,
+        ?string $blob = null,
+        ?string $mimeType = null,
+        array $annotations = [],
+    ): static {
+        if (is_string($uri) && is_subclass_of($uri, Resource::class)) {
+            $uri = Container::getInstance()->make($uri);
+        }
+
+        $embedded = match (true) {
+            $uri instanceof EmbeddedResource => $uri,
+            $uri instanceof Resource => static::embedResource($uri, $arguments, $annotations),
+            default => new EmbeddedResource(
+                uri: $uri,
+                text: $text,
+                blob: $blob,
+                mimeType: $mimeType,
+                annotations: $annotations,
+            ),
+        };
+
+        return new static($embedded);
+    }
+
+    /**
+     * Run the resource's handler and wrap its first contents as an embedded resource.
+     *
+     * @param  array<string, mixed>  $arguments
+     * @param  array<string, mixed>  $annotations
+     */
+    protected static function embedResource(Resource $resource, array $arguments, array $annotations): EmbeddedResource
+    {
+        $uri = static::expandResourceUri($resource, $arguments);
+
+        $container = Container::getInstance();
+
+        // The container seeds a resolved Request with the calling tool's arguments: replace them.
+        $request = $container->make(Request::class);
+        $request->setArguments($arguments);
+        $request->setUri($uri);
+
+        $container->instance(Request::class, $request);
+
+        try {
+            // @phpstan-ignore-next-line
+            $result = $container->call([$resource, 'handle']);
+        } finally {
+            $container->forgetInstance(Request::class);
+        }
+
+        $response = static::firstResponse($result);
+
+        if ($response->isError()) {
+            throw new InvalidArgumentException(sprintf('Resource [%s] returned an error and may not be embedded.', $resource::class));
+        }
+
+        $contents = $response->content()->toResource($resource);
+
+        return new EmbeddedResource(
+            uri: $uri,
+            text: $contents['text'] ?? null,
+            blob: isset($contents['blob']) ? base64_decode((string) $contents['blob'], true) ?: null : null,
+            mimeType: $contents['mimeType'] ?? $resource->mimeType(),
+            annotations: array_merge($resource->annotations(), $annotations),
+        );
+    }
+
+    /**
+     * Fill the resource's URI template with the given arguments.
+     *
+     * @param  array<string, mixed>  $arguments
+     */
+    protected static function expandResourceUri(Resource $resource, array $arguments): string
+    {
+        if (! $resource instanceof HasUriTemplate) {
+            return $resource->uri();
+        }
+
+        $template = $resource->uriTemplate();
+
+        $missing = array_diff($template->variableNames(), array_keys($arguments));
+
+        if ($missing !== []) {
+            throw new InvalidArgumentException(sprintf(
+                'Missing URI template variable%s [%s] for resource [%s].',
+                count($missing) === 1 ? '' : 's',
+                implode(', ', $missing),
+                $resource::class,
+            ));
+        }
+
+        $replacements = [];
+
+        foreach ($template->variableNames() as $name) {
+            $replacements['{'.$name.'}'] = (string) $arguments[$name];
+        }
+
+        $uri = strtr((string) $template, $replacements);
+
+        // Keep the embedded URI readable back through resources/read, which matches a variable within one segment only.
+        if ($template->match($uri) === null) {
+            throw new InvalidArgumentException(sprintf('The arguments do not form a valid URI for the template of resource [%s].', $resource::class));
+        }
+
+        return $uri;
+    }
+
+    /**
+     * Normalize a handler result to its first response.
+     */
+    protected static function firstResponse(mixed $result): Response
+    {
+        if ($result instanceof Generator) {
+            $result = iterator_to_array($result, false);
+        }
+
+        if (is_string($result)) {
+            return static::text($result);
+        }
+
+        if ($result instanceof ResponseFactory) {
+            $result = $result->responses()->all();
+        }
+
+        if (is_array($result)) {
+            $result = array_values(array_filter(
+                $result,
+                fn (mixed $item): bool => ! $item instanceof Response || ! $item->isNotification(),
+            ))[0] ?? null;
+        }
+
+        if ($result instanceof Response) {
+            return $result;
+        }
+
+        throw new InvalidArgumentException('A resource handler must return a response, a string, or a list of responses to be embedded.');
     }
 
     public static function fromStorage(string $path, ?string $disk = null, ?string $mimeType = null): static

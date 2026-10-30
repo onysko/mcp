@@ -13,6 +13,7 @@ use Laravel\Mcp\Server\Tool;
 use Laravel\Mcp\Transport\JsonRpcRequest;
 use Laravel\Mcp\Transport\JsonRpcResponse;
 use Tests\Fixtures\CurrentTimeTool;
+use Tests\Fixtures\EmbeddedResourceTool;
 use Tests\Fixtures\ResourceLinkTool;
 use Tests\Fixtures\ResponseFactoryWithStructuredContentTool;
 use Tests\Fixtures\SayHiTool;
@@ -901,4 +902,44 @@ it('returns a resource link content block in the wire payload', function (): voi
             ],
             'isError' => false,
         ]);
+});
+
+it('returns embedded resource content from a tool', function (): void {
+    $request = JsonRpcRequest::from([
+        'jsonrpc' => '2.0',
+        'id' => 1,
+        'method' => 'tools/call',
+        'params' => ['name' => 'embedded-resource-tool', 'arguments' => []],
+    ]);
+
+    $context = new ServerContext(
+        supportedProtocolVersions: ['2025-03-26'],
+        serverCapabilities: [],
+        implementation: new Implementation('Test Server', '1.0.0'),
+        instructions: 'Test instructions',
+        maxPaginationLength: 50,
+        defaultPaginationLength: 10,
+        tools: [EmbeddedResourceTool::class],
+        resources: [],
+        prompts: [],
+    );
+
+    $this->instance('mcp.request', $request->toRequest());
+
+    $payload = (new CallTool)->handle($request, $context)->toArray();
+
+    expect($payload['result'])->toEqual([
+        'content' => [
+            [
+                'type' => 'resource',
+                'resource' => [
+                    'uri' => 'file:///reports/monthly.json',
+                    'mimeType' => 'application/json',
+                    'text' => '{"total":42}',
+                ],
+                'annotations' => ['audience' => ['user'], 'priority' => 0.9],
+            ],
+        ],
+        'isError' => false,
+    ]);
 });

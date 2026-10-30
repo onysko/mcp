@@ -3,19 +3,26 @@
 declare(strict_types=1);
 
 use Laravel\Mcp\Enums\Role;
+use Laravel\Mcp\Request;
 use Laravel\Mcp\Response;
 use Laravel\Mcp\ResponseFactory;
 use Laravel\Mcp\Schema\Icon;
 use Laravel\Mcp\Server\Attributes\Icon as IconAttribute;
 use Laravel\Mcp\Server\Content\Audio;
 use Laravel\Mcp\Server\Content\Blob;
+use Laravel\Mcp\Server\Content\EmbeddedResource;
 use Laravel\Mcp\Server\Content\Image;
 use Laravel\Mcp\Server\Content\Notification;
 use Laravel\Mcp\Server\Content\ResourceLink;
 use Laravel\Mcp\Server\Content\Text;
 use Laravel\Mcp\Server\Resource;
 use Tests\Fixtures\AnnotatedResource;
+use Tests\Fixtures\BinaryReportResource;
 use Tests\Fixtures\DailyPlanResource;
+use Tests\Fixtures\EchoArgumentsResource;
+use Tests\Fixtures\FailingResource;
+use Tests\Fixtures\StreamingSummaryResource;
+use Tests\Fixtures\UriTemplateSummaryResource;
 
 it('creates a notification response', function (): void {
     $response = Response::notification('test.method', ['key' => 'value']);
@@ -451,3 +458,113 @@ class ResponseResourceWithIconAttribute extends Resource
         return 'content';
     }
 }
+
+it('embeds a resource from a uri string with text contents', function (): void {
+    $response = Response::embeddedResource(
+        'file:///data/report.json',
+        text: '{"total":42}',
+        mimeType: 'application/json',
+        annotations: ['priority' => 0.3],
+    );
+
+    expect($response->content())->toBeInstanceOf(EmbeddedResource::class)
+        ->and($response->content()->toArray())->toEqual([
+            'type' => 'resource',
+            'resource' => [
+                'uri' => 'file:///data/report.json',
+                'mimeType' => 'application/json',
+                'text' => '{"total":42}',
+            ],
+            'annotations' => ['priority' => 0.3],
+        ]);
+});
+
+it('embeds a resource from a uri string with blob contents', function (): void {
+    $response = Response::embeddedResource('file:///data/report.pdf', blob: '%PDF-1.4', mimeType: 'application/pdf');
+
+    expect($response->content()->toArray()['resource'])->toEqual([
+        'uri' => 'file:///data/report.pdf',
+        'mimeType' => 'application/pdf',
+        'blob' => base64_encode('%PDF-1.4'),
+    ]);
+});
+
+it('embeds a Resource class-string by running its handler', function (): void {
+    $response = Response::embeddedResource(DailyPlanResource::class);
+
+    expect($response->content()->toArray())->toEqual([
+        'type' => 'resource',
+        'resource' => [
+            'uri' => 'file://resources/daily-plan.md',
+            'mimeType' => 'text/markdown',
+            'text' => (new DailyPlanResource)->handle(),
+        ],
+    ]);
+});
+
+it('embeds a Resource instance returning a blob', function (): void {
+    $response = Response::embeddedResource(new BinaryReportResource);
+
+    expect($response->content()->toArray()['resource'])->toEqual([
+        'uri' => 'file://reports/monthly.pdf',
+        'mimeType' => 'application/pdf',
+        'blob' => base64_encode('%PDF-1.4 binary'),
+    ]);
+});
+
+it('fills a resource uri template from the arguments and hands them to the handler', function (): void {
+    $response = Response::embeddedResource(UriTemplateSummaryResource::class, ['id' => '42']);
+
+    $resource = $response->content()->toArray()['resource'];
+
+    expect($resource['uri'])->toBe('file://summary/42')
+        ->and(json_decode($resource['text'], true))->toEqual(['id' => '42', 'uri' => 'file://summary/42']);
+});
+
+it('refuses to embed a template resource without its variables', function (): void {
+    expect(fn (): Response => Response::embeddedResource(UriTemplateSummaryResource::class))
+        ->toThrow(InvalidArgumentException::class, 'Missing URI template variable [id] for resource ['.UriTemplateSummaryResource::class.'].');
+});
+
+it('embeds the first content of a streaming resource, skipping notifications', function (): void {
+    $response = Response::embeddedResource(StreamingSummaryResource::class);
+
+    expect($response->content()->toArray()['resource']['text'])->toBe('First page');
+});
+
+it('refuses to embed a resource that returned an error', function (): void {
+    expect(fn (): Response => Response::embeddedResource(FailingResource::class))
+        ->toThrow(InvalidArgumentException::class, 'Resource ['.FailingResource::class.'] returned an error and may not be embedded.');
+});
+
+it('inherits and merges annotations when embedding a Resource', function (): void {
+    $response = Response::embeddedResource(AnnotatedResource::class, annotations: ['priority' => 0.9]);
+
+    expect($response->content()->toArray()['annotations'])->toEqual([
+        'audience' => ['user'],
+        'priority' => 0.9,
+        'lastModified' => '2026-05-01T00:00:00Z',
+    ]);
+});
+
+it('wraps a pre-built EmbeddedResource instance', function (): void {
+    $embedded = new EmbeddedResource('file:///data/report.json', text: 'content');
+
+    expect(Response::embeddedResource($embedded)->content())->toBe($embedded);
+});
+
+it("hands a resource only the embed arguments, not the calling tool's", function (): void {
+    $this->app->instance('mcp.request', new Request(['session_id' => 'outer', 'verbose' => true]));
+
+    $response = Response::embeddedResource(EchoArgumentsResource::class, ['id' => '7']);
+
+    expect(json_decode($response->content()->toArray()['resource']['text'], true))
+        ->toBe(['id' => '7']);
+});
+
+it('refuses template arguments that would not match the template back', function (): void {
+    expect(fn (): Response => Response::embeddedResource(EchoArgumentsResource::class, ['id' => '7/../8']))
+        ->toThrow(InvalidArgumentException::class, 'The arguments do not form a valid URI for the template of resource ['.EchoArgumentsResource::class.'].')
+        ->and(fn (): Response => Response::embeddedResource(EchoArgumentsResource::class, ['id' => '']))
+        ->toThrow(InvalidArgumentException::class);
+});

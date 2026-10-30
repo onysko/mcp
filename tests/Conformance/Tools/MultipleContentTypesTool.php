@@ -23,9 +23,9 @@ class MultipleContentTypesTool extends Tool
         return [
             Response::text('Multiple content types test:'),
             Response::image(Fixtures::IMAGE_BASE64, 'image/png'),
-            Response::resourceLink(
+            Response::embeddedResource(
                 uri: 'test://mixed-content-resource',
-                name: 'mixed-content-resource',
+                text: '{"test":"data","value":123}',
                 mimeType: 'application/json',
             ),
         ];
